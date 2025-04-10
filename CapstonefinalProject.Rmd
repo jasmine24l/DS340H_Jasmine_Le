@@ -1,0 +1,413 @@
+---
+title: "Le_J_HW8"
+output: html_document
+date: "2025-03-06"
+---
+
+```{r Reading in packages, include=FALSE}
+library(rnaturalearth)
+library(mice)
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(leaflet)
+library(tidygeocoder)
+library(sf)
+library(usmap)
+library(leaflet)
+library(usmap)
+library(tidycensus)
+library(mapview)
+library(car)
+library(dplyr)
+library(MASS)
+library(party)
+library(pheatmap)
+library(tigris)
+install.packages("caret", dependencies = TRUE)
+library(recipes)
+library(caret)
+```
+
+
+```{r loading in data and merging}
+#Loading in data 
+bikedata_2021_cleaned$postal.code <- as.character(bikedata_2021_cleaned$postal.code)
+bikedata_2021_cleaned$postal.code <- ifelse(nchar(bikedata_2021_cleaned$postal.code) == 4, paste0('0', bikedata_2021_cleaned$postal.code), bikedata_2021_cleaned$postal.code)
+write.csv(bikedata_2021_cleaned, "/Users/jasmine/Desktop/Statistics/bikedata_2021_cleaned.csv", row.names = FALSE)
+
+# Getting lat and long for each user
+postal_data <- read_excel("/Users/jasmine/Desktop/Statistics/ZIP_Locale_Detail.xls", col_names = TRUE)
+postal_data$postal.code <- postal_data$'DELIVERY ZIPCODE'
+
+postal_city_unique <- postal_data %>%
+   group_by(postal.code) %>%
+   slice(1) %>%
+   ungroup()
+# #Subset of data going to use for analysis
+set.seed(123)
+merged_data <- merge(bikedata_2021_cleaned, postal_city_unique, by = "postal.code")
+
+#Loading in dataset on demographic information about people in boston
+boston_demographic_data <- read.csv("/Users/jasmine/Desktop/Statistics/Capstone Bluebike additonal Dataset - Sheet1.csv")
+boston_demographic_data$postal.code <- ifelse(nchar(boston_demographic_data$postal.code) == 4, paste0('0', boston_demographic_data$postal.code), boston_demographic_data$postal.code)
+
+bluebike_demographics <- merge(bikedata_2021_cleaned, boston_demographic_data, by = "postal.code")
+bluebike_demographics$usertype_cat <- as.factor(bluebike_demographics$usertype)
+colSums(is.na(bluebike_demographics))
+
+```
+
+
+```{r cars}
+#Getting log of trip duration 
+bluebike_demographics$log_tripduration <- log(bluebike_demographics$tripduration)
+
+#subsetting to get rid of specified columns
+bluebike_demographics_subset <- bluebike_demographics[, !(names(bluebike_demographics) %in% c('starttime', 'stoptime', 'start.station.name', 'end.station.name', 'postal_code_cleaned', 'postal_code_num'))]
+
+#getting subset of users 
+bluebike_demographics_sample_subset <- bluebike_demographics_subset[sample(nrow(bluebike_demographics_subset), 50000), ]
+```
+
+```{r getting location to make map}
+#Getting lat and long for each zip code 
+citydata = read_csv("/Users/jasmine/Desktop/Statistics/city_data.csv")
+citydata$postal.code <- citydata$'postalcode'
+View(citydata)
+
+citydata <- citydata %>%
+   group_by(postal.code) %>%
+   slice(1) %>%
+   ungroup()
+set.seed(123)
+final_bluebikes_data <- merge(bluebike_demographics_sample_subset, citydata, by = "postal.code")
+ 
+#adding missing lat and long values to zipcode data 
+zipcode_coords <- data.frame(
+  postal.code = c('02108', '02109', '02110', '02111', '02120', '02134', '02199', '02210','02215', '02467'),
+  lat = c(42.35657 ,42.36498, 42.35797, 42.35067, 42.33212,42.35855,42.34748,42.34815,42.34046,42.31725),
+  long = c(-71.06516,-71.05277,-71.05189,-71.06054,-71.09654,-71.12931,-42.34748,-71.03942,-71.09481,-71.16096) 
+)
+
+#Creating another version of dataset that has all data including lat and long 
+final_bluebikes_data <- final_bluebikes_data %>%
+  left_join(zipcode_coords, by = c("postal.code" = "postal.code")) %>%
+  mutate(
+    lat = ifelse(is.na(lat.x), lat.y, lat.x), 
+    long = ifelse(is.na(long.x), long.y, long.x)  
+  ) %>%
+  select(-lat.x, -long.x, -lat.y, -long.y) 
+
+final_bluebikes_data <- final_bluebikes_data[, colSums(is.na(final_bluebikes_data)) == 0]
+
+zipcode_coords_unique <- final_bluebikes_data %>%
+  distinct(postal.code, .keep_all = TRUE)
+
+
+averages_data <- averages_data %>%
+  left_join(zipcode_coords_unique %>% select(postal.code, lat, long), by = "postal.code")
+
+
+```
+
+##Creating Models 
+
+```{r creating full model, echo=FALSE}
+#Creating full model 
+full_model <- lm(log_tripduration~., data= bluebike_demographics_sample_subset)
+summary(full_model)
+plot(full_model)
+AIC(full_model)
+BIC(full_model)
+
+main_model <- lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black + Percentage.White, data = bluebike_demographics_sample_subset)
+summary(main_model)
+
+#AIC 
+step(lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset),direction="both",k=2) 
+#shows best model is current minus Average.Family.Size  AIC=-24933.94
+
+#BIC
+step(lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset),direction="both",k=log(50000)) #k=log(n) this leads to BIC
+
+summary(lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset))
+
+
+```
+Predicted Model:
+$$\text{Trip_Duration}_i = 6.97 + -0.03 \text{Average_Age}_i - 0.0014 \text{Percentage_with_4yrDegree}_i + 0.02 \text{Commute_Time}_i - 0.005 \text{Male}_i + 0.011 \text{Married}_i - 0.005 \text{Asian}_i + 0.0024623 \text{Black}_i + \epsilon_i, \text{where } \epsilon_i \sim \text{Normal}(0, \sigma)$$
+
+
+```{r Creating different lm models, results=FALSE, message=FALSE, warning=FALSE}
+#using step function to find best model 
+stepaic_model <- step(lm(log_tripduration ~., data = bluebike_demographics_sample_subset), direction = "both")
+summary(stepwise_model)
+
+#Creating model with best AIC 
+lm(log_tripduration ~ postal.code + start.station.id + start.station.latitude + 
+    start.station.longitude + end.station.id + end.station.longitude + 
+    usertype)
+
+#Looking at LOG TRIPDURATION
+main_model <- lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black + Percentage.White, data = bluebike_demographics_sample_subset)
+summary(main_model)
+vif(main_model) #Percentage.White is above 10 VIF threshold so removing Percentage.White 
+
+timeduration_model_minusw <- lm(log_tripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset)
+summary(timeduration_model_minusw)
+vif(timeduration_model_minusw)
+AIC(timeduration_model_minusw) #118277.5
+BIC(timeduration_model_minusw) #118365.7
+
+timeduration_model_reduced <- lm(log_tripduration ~ Average.Age + Commute.Time.in.Minutes  +
+  Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset)
+summary(timeduration_model_reduced)
+vif(timeduration_model_reduced)
+AIC(timeduration_model_reduced) #118283.4
+BIC(timeduration_model_reduced) #118354
+
+train_control <- trainControl(method = "cv", number = 10)
+
+#Doing KNN model 
+knn_model <- train(logtripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes +
+                    Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, 
+                    data = averages_data,
+                    method = "knn", 
+                    trControl = train_control,
+                    linout = TRUE) 
+knn_model$results
+
+#DOing Random Forest Model 
+model_rf <- randomForest(logtripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = averages_data)
+feature_importance <- importance(model_rf)
+
+# View the importance values
+print(feature_importance)
+
+# Plot the variable importance
+par(mar = c(5, 5, 6, 2)) 
+varImpPlot(model_rf)
+title(main = "Feature Importance for Random Forest Model", line = .5, cex.main = 1.2) 
+mtext("Importance of each feature in the Model", side = 1, line = 2, cex = 1.2) 
+
+```
+
+```{r Creating Plots }
+ggplot(final_bluebikes_data, aes(x = postal.code, y = log_tripduration)) + 
+  geom_violin(trim = FALSE, fill = "skyblue", color = "black") +  
+  labs(title = "Violin Plot Side by Side by Category", x = "Category", y = "Value") +  
+  theme_minimal()  # A minimal theme for better clarity
+
+
+ggplot(final_bluebikes_data, aes(x = Commute.Time.in.Minutes, y = log_tripduration)) + 
+  geom_boxplot(fill = "skyblue", color = "black") +  # Create the box plots
+  labs(title = "Box Plot Side by Side by Category", x = "Category", y = "Value") +  
+  theme_minimal()
+
+
+ggplot(final_bluebikes_data, aes(x = Commute.Time.in.Minutes, y = log_tripduration)) + 
+  geom_boxplot(fill = "skyblue", color = "black") + 
+  labs(title = "Box Plot Side by Side by Category", x = "Category", y = "Value") + 
+  facet_wrap(~ usertype_cat) +  
+  theme_minimal()
+
+
+ggplot(final_bluebikes_data, aes(x = Average.Age, y = log_tripduration)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") + 
+  labs(title = "Bar Plot of Age vs. Count", x = "Age", y = "Count") + 
+  theme_minimal()
+
+
+ggplot(final_bluebikes_data, aes(x = Commute.Time.in.Minutes, y = log_tripduration, fill = factor(postal.code))) +
+  geom_violin() +
+  labs(title = "Violin Plot of Percentage Black by Average Age and Zipcode", 
+       x = "Average Age", 
+       y = "Percentage Black",
+       fill = "Zipcode") +  # Adjust the legend title for 'zipcode'
+  theme_minimal()
+
+```
+
+
+```{r}
+# Calculate the average value by age
+averaged_tripduration <- final_bluebikes_data %>%
+  group_by(postal.code) %>%
+  summarise(average_tripduration = mean(tripduration, na.rm = TRUE))
+
+# #Subset of data going to use for analysis 
+set.seed(123)
+averages_data <- merge(averaged_tripduration, boston_demographic_data, by = "postal.code")
+View(averages_data)
+averages_data$logtripduration <- log(averages_data$average_tripduration)
+ggplot(averages_data, aes(x =Average.Age, y = logtripduration)) + 
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "Average Value by Age", x = "Age", y = "Average Value") + 
+  theme_minimal()
+
+plot(averages_data$Percentage.with.4.year.degree, averages_data$logtripduration)
+
+plot(averages_data$Commute.Time.in.Minutes, averages_data$logtripduration)
+
+plot(averages_data$Average.Income, averages_data$logtripduration)
+
+ggplot(averages_data, aes(x = Commute.Time.in.Minutes, y = logtripduration, color = Percentage.Black)) + #contrast color more!!!, larger figure title
+  geom_point(na.rm = TRUE, size = 2) + 
+  geom_smooth(method = "lm", se = FALSE, color = "black") +   
+  scale_color_gradient(low = "purple", high = "orange") +
+  labs(title = "Commute Time to Work vs Bike Trip Duration", 
+       x = "Average commute Time to Work (Minutes)", 
+       y = "Log of Trip Duration", 
+       color = "Percentage of Black Residents") +  
+  theme_minimal()
+
+
+ggplot(averages_data, aes(x = Percentage.with.4.year.degree, y = logtripduration, color = Percentage.White)) + #contrast color more!!!, larger figure title
+  geom_point(na.rm = TRUE, size = 2) + 
+  geom_smooth(method = "lm", se = FALSE, color = "black") +   
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(title = "Percentage with 4 year degree vs Bike Trip Duration", 
+       x = "Percentage with 4 year degree", 
+       y = "Log of Trip Duration", 
+       color = "Percentage of White Residents") +  
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(averages_data, aes(x = Percentage.with.4.year.degree, y = logtripduration, color = Percentage.Black)) +
+  geom_point(na.rm = TRUE, size = 2) + 
+  geom_smooth(method = "lm", se = FALSE, color = "black") +   
+  scale_color_viridis(option = "D", direction = -1) +
+  labs(
+    title = "Percentage with 4yr Degree vs Bike TripDuration", 
+    x = "Percentage with 4yr Degree", 
+    y = "Log of Trip Duration", 
+    color = "Percentage of Black Residents"
+  ) +  
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 18, face = "bold", hjust = .2),  # Larger and centered title
+    axis.title = element_text(size = 14),  # Adjust axis title size
+    legend.title = element_text(size = 12)  # Adjust legend title size
+  )
+
+```
+
+
+```{r}
+#creating Interactive Map to see where users are coming from and length of trip duration 
+color_palette <- colorNumeric(palette = "YlGnBu", domain = averages_data$logtripduration)
+leaflet(averages_data) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~long,
+    lat = ~lat,
+    color = ~color_palette(logtripduration),
+    fillOpacity = 0.7,
+    radius = 8,         
+    clusterOptions = markerClusterOptions()
+  ) %>%
+  addLegend(
+    "bottomright",   # Position of the legend
+    pal = color_palette,  # Color palette
+    values = ~logtripduration,  # The continuous variable values to display
+    title = "Log Trip Duration",   # Title of the legend
+    opacity = 1
+  )
+
+#write.csv(averages_data, "/Users/jasmine/Desktop/Statistics/averages_data.csv", row.names = FALSE)
+```
+
+```{r}
+model1 = lm(logtripduration ~ Average.Age + Average.Income +  Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = averages_data) 
+vif(model1) #0.5594
+AIC(model1)
+BIC(model1)
+step(lm(logtripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = averages_data),direction="both",k=2) 
+#shows best model is current minus Average.Family.Size  AIC=-24933.94
+write.csv(averages_data, "/Users/jasmine/Desktop/Statistics/averages_data.csv", row.names = FALSE)
+#BIC
+step(lm(logtripduration ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = averages_data),direction="both",k=log(31)) 
+
+
+model2 = lm(logtripduration ~ Percentage.with.4.year.degree + Commute.Time.in.Minutes + Percentage.Male, data = averages_data)
+# Summarize the model
+summary(model2) #0.5594
+AIC(model2)
+BIC(model2)
+
+model3 <- lm(logtripduration ~ Average.Age * Commute.Time.in.Minutes + 
+             Percentage.Male + Percentage.Married + Percentage.with.4.year.degree + Percentage.Black, 
+             data = averages_data)
+
+# Summarize the model
+summary(model3)
+
+
+
+```
+
+```{r}
+#Looking at USERTYPE
+colSums(is.na(final_bluebikes_data))
+usertype_model_minusw <- lm(usertype_cat ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = final_bluebikes_data) #GLM 
+summary(usertype_model_minusw)
+vif(usertype_model_minusw)
+AIC(usertype_model_minusw) #46279.34
+BIC(usertype_model_minusw) #46367.54
+
+usertype_model_reduced <- lm(usertype ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes + Percentage.Married + Percentage.Asian, data = bluebike_demographics_sample_subset)
+summary(usertype_model_reduced)
+vif(usertype_model_reduced)
+AIC(usertype_model_reduced) #46738.98
+BIC(usertype_model_reduced) #46800.72
+
+#
+tree = ctree(usertype ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset, controls = ctree_control(maxdepth = 3))
+plot(tree)
+plot(tree, inner_panel=node_inner(tree, pval=FALSE, id= FALSE), terminal_panel=node_terminal(tree,id=FALSE), rescale=TRUE)
+#plot(tree, inner_panel=node_inner(tree, pval=FALSE, id= FALSE), terminal_panel=node_boxplot(tree,id=FALSE))
+
+tree1 = ctree(usertype ~ Average.Age + Percentage.with.4.year.degree + Commute.Time.in.Minutes  +
+  Average.Family.Size + Percentage.Male + Percentage.Married + Percentage.Asian + Percentage.Black, data = bluebike_demographics_sample_subset)
+
+
+plot(tree)
+plot(tree1, inner_panel=node_inner(tree, pval=FALSE, id= FALSE), terminal_panel=node_boxplot(tree,id=FALSE))
+plot(tree1, inner_panel=node_inner(tree, pval=FALSE, id= FALSE), terminal_panel=node_barplot(tree,id=FALSE))
+plot(tree1, inner_panel=node_inner(tree, pval=FALSE, id= FALSE), terminal_panel=node_boxplot(tree,id=FALSE))
+print(tree)
+
+sum(bluebike_demographics_sample_subset$usertype1_cat == 2)
+View(bluebike_demographics)
+
+hist(bluebike_demographics_sample_subset$log_tripduration)
+hist(bluebike_demographics_sample_subset$Average.Income)
+plot(bluebike_demographics_sample_subset$Average.Income)
+hist(bluebike_demographics_sample_subset$Average.Income)
+View(final_bluebikes_data)
+```
+
+
+
+
+
+
+
+
+
+
+
